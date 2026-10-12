@@ -1,6 +1,8 @@
 package es.murgitic.ac107
 
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -9,11 +11,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -54,20 +58,48 @@ class MainActivity : ComponentActivity() {
 fun SensorScreen(modifier: Modifier = Modifier) {
     // Asigno un estado mutable a la variable actualReading, que se inicializa con el valor "Sin consultar"
     val actualReading = remember { mutableStateOf("Sin consultar") }
+    val isLoading = remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
             .fillMaxSize()
             .padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(text = "Sensor MurgiTIC")
-        // Asigno al texto que muestra el estado el valor actual de la variable actualReading, que se actualizará cada vez que se pulse el botón
-        Text(text = actualReading.value)
-        // En la lambda del onClick del botón, actualizo el valor de la variable actualReading con el valor devuelto por la función getRandomSensorReading
-        Button(onClick = { actualReading.value = getRandomSensorReading() }) {
+        // Si el sensor está cargando, mostramos un indicador de carga, si no, mostramos la lectura actual
+        if (isLoading.value) {
+            LoadingIndicator()
+        } else {
+            Text(text = actualReading.value)
+        }
+
+        Button(
+            enabled = !isLoading.value,
+            onClick = {
+                isLoading.value = true
+                // Simulamos una consulta al sensor con un retraso de 2 segundos
+                // Vosotros tendréis que implementar esto con una corrutina y un delay,
+                // como hemos dado en clase.n clase.
+                Handler(Looper.getMainLooper()).postDelayed({
+                    actualReading.value = getRandomSensorReading()
+                    isLoading.value = false
+                }, 2000)
+        }) {
             Text(text = "Consultar sensor")
         }
+    }
+}
+
+@Composable
+fun LoadingIndicator() {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        CircularProgressIndicator()
+        Text(text = "Cargando...")
     }
 }
 
