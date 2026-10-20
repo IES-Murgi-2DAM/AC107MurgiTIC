@@ -1,0 +1,25 @@
+{
+  "name": "Examen PMDM Android (Aislado)",
+  "image": "amazoncorretto:17",
+
+  // AISLAMIENTO DE RED: Corta Internet pero permite compilar
+  "runArgs": [
+    "--network", "none"
+  ],
+
+  // Inyectamos las rutas usando las variables de entorno nativas del PC de cada alumno
+  "containerEnv": {
+    "GRADLE_OPTS": "-Dorg.gradle.offline=true"
+  },
+
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+
+  // Montamos el Android SDK local de la máquina del alumno dentro del contenedor
+  "mounts": [
+    "source=${localEnv:ANDROID_HOME},target=/opt/android-sdk,type=bind"
+  ],
+
+  // Mantiene los permisos de archivos limpios si alguien usa Linux/Ubuntu
+  "updateRemoteUserUID": true
+}
