@@ -128,6 +128,22 @@ elif [ "$(uname -s)" = "Linux" ]; then
   USER_ARGS=(--user "$(id -u):$(id -g)")
 fi
 
+# En Fedora/RHEL con SELinux en enforcing, container_t no puede ejecutar el
+# IDE montado del host ni escribir en /workspace: los bind mounts conservan la
+# etiqueta del home (data_home_t, cache_home_t) y "ro" no la cambia. La opción
+# :z reetiquetaría el origen (los ~2 GB de Toolbox, y Toolbox lo revierte al
+# actualizar), así que se desactiva el etiquetado solo para este contenedor,
+# que sigue aislado por namespaces. En Ubuntu nativo y en WSL2 no hay SELinux y
+# no se añade nada. KEEP_SELINUX=1 conserva el etiquetado (hará falta :z).
+SELINUX_ARGS=()
+if [ "${KEEP_SELINUX:-0}" != "1" ]; then
+  if { [ -r /sys/fs/selinux/enforce ] \
+       && [ "$(cat /sys/fs/selinux/enforce 2>/dev/null)" = "1" ]; } \
+     || [ "$(getenforce 2>/dev/null || true)" = "Enforcing" ]; then
+    SELINUX_ARGS=(--security-opt label=disable)
+  fi
+fi
+
 STATE_DIR="${STATE_DIR:-$HOME/.local/share/idea-container}"
 GRADLE_CACHE="${GRADLE_CACHE:-$STATE_DIR/gradle}"
 CONTAINER_NAME="${CONTAINER_NAME:-idea-desktop-test}"
@@ -398,7 +414,11 @@ if [ "${BLOCK_PLUGIN_MARKETPLACE:-1}" = "1" ]; then
   done
 fi
 
-if [ "$DRY_RUN" != "1" ] && ! "$CONTAINER_ENGINE" image inspect "$IMAGE" >/dev/null 2>&1; then
+# La imagen tiene que traer el JDK del contenedor. Comprobar solo si existe no
+# basta: quien ya la tuviera construida no la reconstruiría y seguiría sin JDK,
+# así que se mira el label con el que se marca la versión que lo incluye.
+IMAGE_JDK="$("$CONTAINER_ENGINE" image inspect -f '{{ index .Config.Labels "idea-desktop.jdk" }}' "$IMAGE" 2>/dev/null || true)"
+if [ "$DRY_RUN" != "1" ] && [ "$IMAGE_JDK" != "17" ]; then
   echo "Construyendo imagen $IMAGE con $CONTAINER_ENGINE ..."
   "$CONTAINER_ENGINE" build -t "$IMAGE" -f "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR"
 fi
@@ -568,6 +588,7 @@ RUN_ARGS=(
   --name "$CONTAINER_NAME"
   --init
   "${USER_ARGS[@]}"
+  "${SELINUX_ARGS[@]}"
   --network "$NETWORK"
   --shm-size=1g
   -e "DISPLAY=$DISPLAY"
@@ -578,6 +599,9 @@ RUN_ARGS=(
   -e NO_AT_BRIDGE=1
   -e GRADLE_USER_HOME=/home/developer/.gradle
   -e ANDROID_USER_HOME=/home/developer/.android
+  -e JDK_HOME=/opt/jdk-17
+  -e "DATA_DIR_NAME=$DATA_DIR_NAME"
+  -e PROJECT_DIR=/workspace
   -e REMOTE_CONTAINERS=1
   -e ADB_SERVER_SOCKET=tcp:127.0.0.1:5037
   -e _JAVA_AWT_WM_NONREPARENTING=1

@@ -56,12 +56,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libxrender1 \
       libxt6 \
       libxtst6 \
+      openjdk-17-jdk-headless \
       openssh-client \
       procps \
       socat \
       xauth \
       xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# JDK for the project itself (Gradle/AGP). The host JDK cannot be reused: on
+# WSL it is a Windows build and on Linux it may simply not exist, so the image
+# always ships the same Java 17, which is what the Android projects target.
+# The fixed symlink keeps the path used in the IDE's SDK table stable.
+RUN jdk_dir="$(dirname "$(dirname "$(readlink -f /usr/bin/javac)")")" \
+    && ln -s "$jdk_dir" /opt/jdk-17
+
+# Marks the image so the launcher can tell whether it predates the bundled JDK
+# and has to be rebuilt.
+LABEL idea-desktop.jdk="17"
 
 RUN useradd --create-home --uid 1000 --shell /bin/bash developer \
     && mkdir -p /home/developer/.config/JetBrains \
@@ -74,10 +86,12 @@ RUN useradd --create-home --uid 1000 --shell /bin/bash developer \
 USER developer
 WORKDIR /home/developer
 ENV HOME=/home/developer
+ENV JAVA_HOME=/opt/jdk-17
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY jdk-table.sh /usr/local/bin/jdk-table.sh
 USER root
-RUN chmod 755 /usr/local/bin/entrypoint.sh \
+RUN chmod 755 /usr/local/bin/entrypoint.sh /usr/local/bin/jdk-table.sh \
     && touch /.dockerenv
 USER developer
 

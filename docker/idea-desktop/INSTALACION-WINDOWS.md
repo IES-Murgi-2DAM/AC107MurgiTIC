@@ -5,6 +5,9 @@ Requisitos previos para poder abrir el proyecto con el IDE del contenedor.
 Los permisos de administrador solo hacen falta en la instalación inicial
 (secciones 1 y 2). Para usar el IDE se arranca con doble clic y sin elevar.
 
+Si trabajas en **Linux nativo** (Ubuntu, Debian, Fedora…), no necesitas WSL ni
+Docker Desktop: mira la **sección 9**.
+
 ## 1. WSL2 con Ubuntu
 
 En PowerShell **como administrador**:
@@ -47,9 +50,14 @@ docker run --rm hello-world
 
 Si responde `Hello from Docker!`, está listo.
 
-## 3. Comprobar que WSLg abre ventanas
+## 3. Dependencias de Ubuntu en WSL (`socat`) y WSLg
 
 WSL2 ya incluye WSLg, no hace falta instalar ningún servidor X en Windows.
+
+`socat` es **obligatorio**: es el puente entre el IDE del contenedor y el adb
+del host. Sin él el IDE arranca, pero el Device Manager sale vacío aunque el
+emulador esté en marcha. Se instala **en Ubuntu (WSL)**, no en Windows, porque
+el lanzador y el puente se ejecutan en la distro:
 
 ```bash
 sudo apt update
@@ -59,6 +67,9 @@ xeyes
 
 Debe aparecer una ventana con unos ojos. Si no aparece, actualiza Windows
 (`wsl --update`) antes de continuar.
+
+Si usas **Linux nativo** en lugar de Windows, `socat` también es obligatorio
+(ver la sección 9).
 
 ## 4. IntelliJ IDEA Ultimate (no hace falta Android Studio)
 
@@ -80,6 +91,12 @@ configuración, los plugins y la ruta del SDK (por defecto
 
 > El IDE de Windows y el del contenedor tienen que ser la **misma versión**:
 > el lanzador lo comprueba y descarga la versión de Linux equivalente.
+
+> **El JDK lo pone el contenedor, no el equipo**: la imagen incluye un
+> **JDK 17** (OpenJDK) en `/opt/jdk-17` y lo registra automáticamente en
+> IntelliJ con el nombre que pida el proyecto (en este proyecto,
+> `corretto-17`). No hace falta instalar ningún JDK en Windows ni en Ubuntu, y
+> el JDK del host no se monta para compilar.
 
 ## 5. Dónde tiene que estar el proyecto
 
@@ -139,19 +156,41 @@ siguientes veces arranca en segundos.
 
 ## 7. Emulador o móvil por USB
 
-El emulador se ejecuta **en Windows**, no dentro de WSL ni del contenedor: el
-IDE del contenedor solo lo ve como un dispositivo conectado por adb.
+El emulador se ejecuta **en el host** —en Windows, o en Linux nativo—, nunca
+dentro del contenedor: el IDE del contenedor solo lo ve como un dispositivo
+conectado por adb.
 
 1. Abre IntelliJ IDEA en Windows y crea el AVD en el **Device Manager**
    (solo hace falta la primera vez).
-2. Arranca el emulador **desde ese IDEA de Windows, antes** de abrir el IDE del
-   contenedor.
+2. Arranca el emulador **antes** de abrir el IDE del contenedor, mejor desde una
+   terminal (ver el aviso de abajo).
 3. Comprueba en PowerShell: `adb devices` debe listar el emulador.
 4. Arranca el IDE con el lanzador: él mismo ejecuta `adb -a start-server` y crea
    el puente para que el IDE del contenedor vea el dispositivo.
 
+> **Arranca el AVD desde la terminal, no desde el Device Manager del IDE del
+> host.** Si lo lanza ese IDE, el emulador arranca **sin ventana**
+> (`-qt-hide-window`) y se muestra **incrustado** en su tool window de
+> dispositivos. Si luego cierras ese IDE, el emulador sigue vivo pero **ya no se
+> ve en ningún sitio**: no basta con cerrar el IDE, hay que matar el proceso y
+> volver a arrancarlo.
+>
+> ```bash
+> # Linux nativo, WSL o macOS
+> "$ANDROID_HOME/emulator/emulator" -avd Pixel_6a
+> ```
+>
+> ```powershell
+> # Windows (PowerShell)
+> & "$env:LOCALAPPDATA\Android\Sdk\emulator\emulator.exe" -avd Pixel_6a
+> ```
+
+En **Linux nativo** los pasos son los mismos cambiando «IntelliJ IDEA en
+Windows» por el IDE del host y PowerShell por la terminal; allí el lanzador
+ejecuta `adb start-server` (sin `-a`) porque adb escucha ya en `127.0.0.1`.
+
 Dentro del IDE del contenedor el Device Manager mostrará el emulador ya
-arrancado, pero **no podrá crearlo ni iniciarlo** (el emulador es de Windows).
+arrancado, pero **no podrá crearlo ni iniciarlo** (el emulador es del host).
 
 Si el IDE no muestra el dispositivo, en PowerShell:
 
@@ -203,6 +242,7 @@ Variables que acepta el lanzador, por si quieres tocar algo:
 | `CONTAINER_ENGINE=docker` | Fuerza el motor de contenedores |
 | `CONTAINER_NAME=...` | Nombre del contenedor (por defecto `idea-desktop-test`) |
 | `ALLOW_WSL_FS=1` | Permite arrancar con el proyecto dentro de WSL (bajo tu riesgo) |
+| `KEEP_SELINUX=1` | En Fedora/RHEL conserva el etiquetado SELinux (por defecto se desactiva para el contenedor) |
 
 `Ctrl+C` en esa terminal para el contenedor y cierra el IDE. Si la terminal se
 cierra de golpe, puede quedar el contenedor ocupando el nombre; el lanzador lo
@@ -214,15 +254,36 @@ docker rm -f idea-desktop-test
 
 Para ver qué hay corriendo: `docker ps`.
 
+## 9. Linux nativo (Ubuntu/Debian o Fedora/RHEL)
+
+No hace falta WSL ni Docker Desktop: con Podman (recomendado) o Docker y
+`socat`, el lanzador funciona igual. `socat` es obligatorio por lo mismo que en
+WSL: sin él no hay puente con el adb del host y el Device Manager sale vacío.
+
+```bash
+# Debian / Ubuntu
+sudo apt update && sudo apt install -y socat
+
+# Fedora / RHEL
+sudo dnf install -y socat
+```
+
+El resto de la guía aplica igual, salvo todo lo específico de WSL y de Docker
+Desktop. Desde la carpeta del proyecto:
+
+```bash
+bash docker/idea-desktop/run-idea.sh
+```
+
 ## Problemas frecuentes
 
 | Síntoma | Solución |
 |---|---|
 | `docker: command not found` en Ubuntu | Falta activar la integración WSL en Docker Desktop |
 | No aparece ninguna ventana del IDE | `wsl --update` y comprobar `xeyes` |
-| `instala socat en el host` | `sudo apt install -y socat` |
+| `instala socat en el host` | `sudo apt install -y socat` (Debian/Ubuntu) o `sudo dnf install -y socat` (Fedora/RHEL), y relanza el IDE |
 | `no alcanzo el servidor adb` | `adb kill-server && adb -a start-server` en PowerShell |
-| El IDE no ve el emulador | Arranca el AVD **antes** que el IDE |
+| El IDE no ve el emulador | Arranca el AVD **antes** que el IDE y comprueba que `socat` está instalado (secciones 3 y 9) |
 | Pide login de JetBrains | Abre una vez IntelliJ IDEA en Windows y valida la licencia |
 | `Ya hay un IDE abierto en el contenedor` | Ya hay una ventana del IDE abierta, o quedó un contenedor suelto: `docker rm -f idea-desktop-test` |
 | El IDE avisa de que falta un componente del SDK y no puede instalarlo | El SDK se monta de solo lectura: instálalo en el IDEA de Windows y vuelve a abrir |

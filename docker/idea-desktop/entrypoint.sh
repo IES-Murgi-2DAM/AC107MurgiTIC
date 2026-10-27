@@ -8,6 +8,11 @@ if [ -n "${ADB_BRIDGE_SOCKET:-}" ] && [ -S "$ADB_BRIDGE_SOCKET" ]; then
     UNIX-CONNECT:"$ADB_BRIDGE_SOCKET" &
 fi
 
+# The project references its JDK by name (.idea/misc.xml, .idea/gradle.xml).
+# The container always provides the same JDK, so it is registered before the
+# IDE reads the SDK table; otherwise Gradle sync fails with "JDK not found".
+/usr/local/bin/jdk-table.sh || true
+
 # Run the IDE as a child so the container survives its own restart, which the
 # IDE performs after a license is activated.
 "$@" &

@@ -41,7 +41,7 @@ if not exist "%PROJECT_DIR%\docker\idea-desktop\run-idea.sh" (
 rem Los ficheros .sh pueden llegar con finales de linea de Windows (CRLF) si
 rem el proyecto se copio en un ZIP o por USB; bash falla con eso, asi que se
 rem normalizan antes de ejecutar.
-wsl.exe %DISTRO% --cd "%PROJECT_DIR%" bash -c "sed -i 's/\r$//' docker/idea-desktop/run-idea.sh docker/idea-desktop/entrypoint.sh 2>/dev/null; bash docker/idea-desktop/run-idea.sh"
+wsl.exe %DISTRO% --cd "%PROJECT_DIR%" bash -c "sed -i 's/\r$//' docker/idea-desktop/run-idea.sh docker/idea-desktop/entrypoint.sh docker/idea-desktop/jdk-table.sh 2>/dev/null; bash docker/idea-desktop/run-idea.sh"
 
 if errorlevel 1 (
   echo.
