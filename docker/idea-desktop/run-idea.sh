@@ -31,6 +31,46 @@ if [ "${FORCE_WSL:-0}" = "1" ] || [ -n "${WSL_DISTRO_NAME:-}" ] \
   IS_WSL=1
 fi
 
+# Ejecuta un comando que puede tardar sin dejar la terminal muda: va mostrando
+# los segundos transcurridos en la misma línea. La salida del comando se guarda
+# y solo se muestra si falla, para no llenar la pantalla con el ruido de tar,
+# cp o adb. Sin terminal (por ejemplo desde Abrir-IDE.bat) no dibuja nada.
+# PASO_QUIETO=1 delante de la llamada oculta también el aviso de fallo, para
+# los pasos en los que fallar es normal (por ejemplo, si no hay nada que
+# importar). PASO_SALIDA=<fichero> guarda la salida del comando, para los pasos
+# que devuelven datos en vez de ejecutar algo.
+paso() {
+  local msg="$1"; shift
+  local log status=0 pid secs=0 quieto="${PASO_QUIETO:-0}"
+  log="$(mktemp "${TMPDIR:-/tmp}/idea-paso.XXXXXX")" || { "$@"; return; }
+  if [ ! -t 1 ]; then
+    "$@" >"$log" 2>&1 || status=$?
+    if [ "$status" -ne 0 ] && [ "$quieto" != "1" ]; then
+      echo "  $msg: ha fallado." >&2
+      sed 's/^/    /' "$log" >&2
+    fi
+    [ -z "${PASO_SALIDA:-}" ] || cp -f "$log" "$PASO_SALIDA" 2>/dev/null || true
+    rm -f "$log"
+    return "$status"
+  fi
+  "$@" >"$log" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    printf '\r  %s... %ds ' "$msg" "$secs"
+    sleep 1
+    secs=$((secs + 1))
+  done
+  wait "$pid" || status=$?
+  printf '\r\033[K'
+  if [ "$status" -ne 0 ] && [ "$quieto" != "1" ]; then
+    echo "  $msg: ha fallado." >&2
+    sed 's/^/    /' "$log" >&2
+  fi
+  [ -z "${PASO_SALIDA:-}" ] || cp -f "$log" "$PASO_SALIDA" 2>/dev/null || true
+  rm -f "$log"
+  return "$status"
+}
+
 # C:\Users\x\AppData -> /mnt/c/Users/x/AppData
 # local.properties escapa los dos puntos de la unidad (sdk.dir=C\:\\Users\\...),
 # así que se normaliza primero ese escape y después las barras.
@@ -45,24 +85,40 @@ win_path() {
   esac
 }
 
-# Pide a Windows el valor real de una variable de entorno. Las rutas estándar no
-# sirven siempre: hay perfiles con el usuario en otra unidad y administradores
-# que han redirigido AppData, y entonces C:\Users\<usuario>\AppData no existe.
-win_env() {
-  local var="$1" value
+# Pide a Windows su entorno. Cada cmd.exe lanzado desde WSL tarda casi un
+# segundo, así que se vuelca todo con un solo `set` en vez de preguntar una
+# variable por llamada. Las rutas estándar no sirven siempre: hay perfiles con
+# el usuario en otra unidad y administradores que han redirigido AppData, y
+# entonces C:\Users\<usuario>\AppData no existe.
+win_env_dump() {
   [ "$IS_WSL" = "1" ] || return 1
   command -v cmd.exe >/dev/null 2>&1 || return 1
-  value="$(cmd.exe /c "echo %$var%" 2>/dev/null | tr -d '\r')"
-  # Si la variable no existe, cmd deja el nombre sin expandir.
-  case "$value" in ""|"%$var%") return 1 ;; esac
+  cmd.exe /c set 2>/dev/null | tr -d '\r'
+}
+
+# Valor de una variable dentro del volcado anterior, ya convertido a /mnt/...
+win_env_get() {
+  local dump="$1" name="$2" line value=""
+  while IFS= read -r line; do
+    case "$line" in
+      "$name="*) value="${line#*=}"; break ;;
+    esac
+  done <<< "$dump"
+  [ -n "$value" ] || return 0
   win_path "$value"
 }
 
 if [ "$IS_WSL" = "1" ]; then
-  WIN_HOME="${WIN_HOME:-$(win_env USERPROFILE || true)}"
-  WIN_APPDATA="${WIN_APPDATA:-$(win_env APPDATA || true)}"
-  WIN_LOCALAPPDATA="${WIN_LOCALAPPDATA:-$(win_env LOCALAPPDATA || true)}"
-  WIN_PROGRAMFILES="${WIN_PROGRAMFILES:-$(win_env ProgramFiles || true)}"
+  WIN_ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/idea-winenv.XXXXXX")"
+  PASO_QUIETO=1 PASO_SALIDA="$WIN_ENV_FILE" \
+    paso "Leyendo la configuración de Windows" win_env_dump || true
+  WIN_ENV_DUMP="$(cat "$WIN_ENV_FILE" 2>/dev/null || true)"
+  rm -f "$WIN_ENV_FILE"
+  WIN_HOME="${WIN_HOME:-$(win_env_get "$WIN_ENV_DUMP" USERPROFILE)}"
+  WIN_APPDATA="${WIN_APPDATA:-$(win_env_get "$WIN_ENV_DUMP" APPDATA)}"
+  WIN_LOCALAPPDATA="${WIN_LOCALAPPDATA:-$(win_env_get "$WIN_ENV_DUMP" LOCALAPPDATA)}"
+  WIN_PROGRAMFILES="${WIN_PROGRAMFILES:-$(win_env_get "$WIN_ENV_DUMP" ProgramFiles)}"
+  unset WIN_ENV_DUMP
   [ -n "${WIN_APPDATA:-}" ] || WIN_APPDATA="${WIN_HOME:-}/AppData/Roaming"
   [ -n "${WIN_LOCALAPPDATA:-}" ] || WIN_LOCALAPPDATA="${WIN_HOME:-}/AppData/Local"
 fi
@@ -307,7 +363,8 @@ if [ "$IS_WSL" = "1" ] && [ -z "${IDE_HOME:-}" ]; then
       echo "instalado." >&2
       exit 1
     fi
-    tar -xzf "$DL_DIR/idea.tar.gz" -C "$DL_DIR" --strip-components=1
+    descomprimir_ide() { tar -xzf "$DL_DIR/idea.tar.gz" -C "$DL_DIR" --strip-components=1; }
+    paso "Descomprimiendo IntelliJ IDEA" descomprimir_ide
     rm -f "$DL_DIR/idea.tar.gz"
     rm -rf "$LINUX_IDE_DIR"
     mv "$DL_DIR" "$LINUX_IDE_DIR"
@@ -385,11 +442,25 @@ done
 # cache locked. Seed a private cache once so the container can work offline.
 # En WSL no se siembra: la caché de Windows trae artefactos y wrappers de
 # Windows que dentro del contenedor no sirven.
+# La copia puede ser de varios GB (la caché de Android es grande), así que
+# tarda lo suyo y por eso se muestra el latido. --reflink=auto no cuesta nada
+# donde no hay soporte y en btrfs/XFS la copia es instantánea y no ocupa.
+# SEED_GRADLE_CACHE=0 se la salta y Gradle descarga lo que necesite.
 if [ ! -f "$GRADLE_CACHE/.seeded-from-host" ] && [ "$IS_WSL" != "1" ] \
-   && [ -d "$HOME/.gradle/wrapper" ]; then
-  echo "Copiando la caché de Gradle del host a $GRADLE_CACHE (solo la primera vez)..."
-  cp -a "$HOME/.gradle/wrapper" "$HOME/.gradle/caches" "$GRADLE_CACHE/" 2>/dev/null || true
-  touch "$GRADLE_CACHE/.seeded-from-host"
+   && [ "${SEED_GRADLE_CACHE:-1}" = "1" ] && [ -d "$HOME/.gradle/wrapper" ]; then
+  seed_size="$(mktemp "${TMPDIR:-/tmp}/idea-seed.XXXXXX")"
+  sembrar_cache_gradle() {
+    cp -a --reflink=auto "$HOME/.gradle/wrapper" "$HOME/.gradle/caches" "$GRADLE_CACHE/"
+    du -sh "$GRADLE_CACHE" 2>/dev/null | cut -f1
+  }
+  if PASO_SALIDA="$seed_size" \
+     paso "Copiando la caché de Gradle del host (solo la primera vez)" sembrar_cache_gradle; then
+    touch "$GRADLE_CACHE/.seeded-from-host"
+    echo "Caché de Gradle copiada en $GRADLE_CACHE ($(tail -n 1 "$seed_size" 2>/dev/null))."
+  else
+    echo "Aviso: no he podido copiar la caché de Gradle; se descargará al compilar." >&2
+  fi
+  rm -f "$seed_size"
 fi
 
 # Si la ventana anterior se cerró de golpe (Ctrl+C, terminal cerrada) puede
@@ -412,18 +483,40 @@ fi
 # sustituto de git: cubre un guardado corrupto o un borrado accidental desde
 # el IDE. Se conservan las tres copias más recientes de cada proyecto (el
 # directorio de estado es común a todos los exámenes). AUTO_BACKUP=0 la anula.
+#
+# Solo se copia lo que el alumno escribe. Todo lo demás lo regeneran Gradle y
+# el IDE y es lo que hace que la copia tarde y ocupe: build/ de cada módulo,
+# .gradle/, .idea/, .kotlin/, los restos del NDK (.cxx, .externalNativeBuild)
+# y los binarios empaquetados. Con esas exclusiones un proyecto de examen
+# ocupa unos cientos de KB en vez de varios GB.
 if [ "${AUTO_BACKUP:-1}" = "1" ]; then
   BACKUP_DIR="$STATE_DIR/backups/$(basename "$PROJECT_DIR")"
   mkdir -p "$BACKUP_DIR"
   backup_target="$BACKUP_DIR/$(date +%Y%m%d-%H%M%S)"
+  BACKUP_EXCLUDES=(--exclude-vcs --exclude=.git --exclude=build
+                   --exclude=.gradle --exclude=.idea --exclude=.kotlin
+                   --exclude=.cxx --exclude=.externalNativeBuild
+                   --exclude=captures --exclude='*.apk' --exclude='*.aab'
+                   --exclude='*.hprof')
   if mkdir "$backup_target" 2>/dev/null; then
-    tar -C "$PROJECT_DIR" -cf - \
-        --exclude=build --exclude=.gradle --exclude=.git --exclude=.idea/caches . 2>/dev/null \
-      | tar -C "$backup_target" -xf - 2>/dev/null || true
-    find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null \
-      | sort -rn | tail -n +4 | cut -d' ' -f2- \
-      | while IFS= read -r old; do rm -rf "$old"; done
-    echo "Copia de seguridad del proyecto en $backup_target"
+    hacer_copia() {
+      # timeout: si el árbol vive en /mnt/c (WSL) o tiene algo raro, la copia
+      # no puede dejar el arranque esperando para siempre.
+      timeout 180 tar -C "$PROJECT_DIR" -cf - "${BACKUP_EXCLUDES[@]}" . \
+        | tar -C "$backup_target" -xf -
+    }
+    if paso "Copia de seguridad del proyecto" hacer_copia; then
+      echo "Copia de seguridad del proyecto en $backup_target ($(du -sh "$backup_target" 2>/dev/null | cut -f1))"
+    else
+      rm -rf "$backup_target"
+      echo "Aviso: no he podido hacer la copia de seguridad; sigo adelante." >&2
+    fi
+    borrar_copias_viejas() {
+      find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null \
+        | sort -rn | tail -n +4 | cut -d' ' -f2- \
+        | while IFS= read -r old; do rm -rf "$old"; done
+    }
+    paso "Borrando las copias de seguridad antiguas" borrar_copias_viejas || true
   fi
 fi
 
@@ -557,7 +650,8 @@ if [ "${IMPORT_HOST_LICENSE:-1}" = "1" ]; then
       cp -a "$HOST_PREFS" "$JAVA_STATE/.userPrefs/jetbrains"
       echo "Cuenta y términos del IDE del host importados en el contenedor."
       LICENSE_IMPORTED=1
-    elif import_windows_prefs "$JAVA_STATE/.userPrefs/jetbrains"; then
+    elif PASO_QUIETO=1 paso "Importando la cuenta de JetBrains del registro de Windows" \
+           import_windows_prefs "$JAVA_STATE/.userPrefs/jetbrains"; then
       echo "Cuenta de JetBrains del IDE de Windows importada en el contenedor."
       LICENSE_IMPORTED=1
     fi
@@ -741,11 +835,14 @@ if [ "$ADB_BRIDGE" = "1" ] && [ -n "$ADB_BIN" ]; then
         ADB_HOST="$(ip route show default 2>/dev/null | awk '/^default/ {print $3; exit}')"
         ADB_HOST="${ADB_HOST:-127.0.0.1}"
       fi
-      "$ADB_BIN" -a start-server >/dev/null 2>&1 || true
+      PASO_QUIETO=1 paso "Arrancando el servidor adb del host" "$ADB_BIN" -a start-server || true
     else
-      "$ADB_BIN" start-server >/dev/null 2>&1 || true
+      PASO_QUIETO=1 paso "Arrancando el servidor adb del host" "$ADB_BIN" start-server || true
     fi
-    if ! (exec 3<>"/dev/tcp/$ADB_HOST/5037") 2>/dev/null; then
+    # timeout: si la IP no es la correcta (o el firewall de Windows descarta
+    # los paquetes) un connect a pelo se queda esperando minutos sin decir nada.
+    if ! PASO_QUIETO=1 paso "Comprobando el servidor adb en $ADB_HOST:5037" \
+           timeout 5 bash -c "exec 3<>/dev/tcp/$ADB_HOST/5037"; then
       echo "Aviso: no alcanzo el servidor adb en $ADB_HOST:5037." >&2
       if [ "$IS_WSL" = "1" ]; then
         echo "En Windows ejecuta: adb kill-server && adb -a start-server" >&2

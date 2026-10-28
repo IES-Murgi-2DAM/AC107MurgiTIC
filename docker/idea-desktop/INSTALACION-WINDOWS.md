@@ -163,6 +163,24 @@ La primera vez descarga el IDE de Linux de la misma versión que el de Windows
 (~1,6 GB) y lo guarda en `~/.local/share/idea-container/idea-linux/`. Las
 siguientes veces arranca en segundos.
 
+Mientras hace las tareas largas (copiar la caché de Gradle, la copia de
+seguridad del proyecto, arrancar adb) el lanzador va contando los segundos en
+la misma línea:
+
+```
+  Copiando la caché de Gradle del host (solo la primera vez)... 12s
+```
+
+Si ese contador avanza, está trabajando: no se ha colgado. La primera vez
+tarda más porque copia la caché de Gradle de tu usuario (varios GB) para que
+luego puedas compilar sin conexión.
+
+Antes de arrancar, el lanzador guarda también una copia de seguridad del
+proyecto en `~/.local/share/idea-container/backups/<carpeta-proyecto>/`. Copia
+solo lo que escribes (código, ficheros de Gradle, recursos): lo que generan
+Gradle y el IDE (`build/`, `.gradle/`, `.idea/`...) se queda fuera, así que
+ocupa unos cientos de KB. Se conservan las tres copias más recientes.
+
 ## 7. Emulador o móvil por USB
 
 El emulador se ejecuta **en el host** —en Windows, o en Linux nativo—, nunca
@@ -246,6 +264,7 @@ Variables que acepta el lanzador, por si quieres tocar algo:
 | `DRY_RUN=1` | Imprime el comando `docker run` sin arrancar nada |
 | `NETWORK=none` | Arranca sin red (modo examen aislado) |
 | `AUTO_BACKUP=0` | No hace la copia de seguridad del proyecto |
+| `SEED_GRADLE_CACHE=0` | No copia la caché de Gradle del host al contenedor (solo afecta a la primera vez) |
 | `ADB_HOST=...` | IP del servidor adb (por defecto la puerta de enlace de WSL) |
 | `SDK_DIR=/ruta` | Fuerza la ruta del SDK de Android |
 | `IDE_HOME=/ruta` | Fuerza la ruta del IDE Linux del host (solo Linux nativo; ver §9) |
@@ -354,4 +373,5 @@ IDE_HOME="$HOME/idea-IU-2024.3" bash docker/idea-desktop/run-idea.sh
 | Pide login de JetBrains | Abre una vez IntelliJ IDEA en Windows y valida la licencia; el lanzador importa la cuenta desde el registro de Windows y el `idea.key` más reciente |
 | El IDE del contenedor pide otra vez el diálogo de compartir datos con JetBrains | Es normal si nunca lo respondiste en Windows: la respuesta se guarda en el registro y se copia al contenedor |
 | `Ya hay un IDE abierto en el contenedor` | Ya hay una ventana del IDE abierta, o quedó un contenedor suelto: `docker rm -f idea-desktop-test` |
+| Se queda parado un buen rato al arrancar, sin mensajes | Es la copia de la caché de Gradle (varios GB, solo la primera vez) o la copia de seguridad; mientras el contador de segundos avance, está trabajando. `SEED_GRADLE_CACHE=0` se salta la copia de la caché |
 | El IDE avisa de que falta un componente del SDK y no puede instalarlo | El SDK se monta de solo lectura: instálalo en el IDEA de Windows y vuelve a abrir |
