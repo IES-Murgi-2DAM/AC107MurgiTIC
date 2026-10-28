@@ -31,37 +31,46 @@ if [ "${FORCE_WSL:-0}" = "1" ] || [ -n "${WSL_DISTRO_NAME:-}" ] \
   IS_WSL=1
 fi
 
-# Ejecuta un comando que puede tardar sin dejar la terminal muda: va mostrando
-# los segundos transcurridos en la misma línea. La salida del comando se guarda
-# y solo se muestra si falla, para no llenar la pantalla con el ruido de tar,
-# cp o adb. Sin terminal (por ejemplo desde Abrir-IDE.bat) no dibuja nada.
+# Ejecuta un comando que puede tardar sin dejar la salida muda: va mostrando
+# los segundos transcurridos. La salida del comando se guarda y solo se muestra
+# si falla, para no llenar la pantalla con el ruido de tar, cp o adb.
+#
+# Con terminal el aviso se reescribe en la misma línea y desaparece al acabar.
+# Sin terminal (ventana Run de IntelliJ, una tubería, wsl.exe desde
+# Abrir-IDE.bat) no se puede reescribir, así que se deja una línea cada 5
+# segundos: es la única forma de que el proceso no parezca colgado ahí.
+#
 # PASO_QUIETO=1 delante de la llamada oculta también el aviso de fallo, para
 # los pasos en los que fallar es normal (por ejemplo, si no hay nada que
 # importar). PASO_SALIDA=<fichero> guarda la salida del comando, para los pasos
 # que devuelven datos en vez de ejecutar algo.
 paso() {
   local msg="$1"; shift
-  local log status=0 pid secs=0 quieto="${PASO_QUIETO:-0}"
+  local log status=0 pid secs=0 tick=0 quieto="${PASO_QUIETO:-0}" tty=0
   log="$(mktemp "${TMPDIR:-/tmp}/idea-paso.XXXXXX")" || { "$@"; return; }
-  if [ ! -t 1 ]; then
-    "$@" >"$log" 2>&1 || status=$?
-    if [ "$status" -ne 0 ] && [ "$quieto" != "1" ]; then
-      echo "  $msg: ha fallado." >&2
-      sed 's/^/    /' "$log" >&2
-    fi
-    [ -z "${PASO_SALIDA:-}" ] || cp -f "$log" "$PASO_SALIDA" 2>/dev/null || true
-    rm -f "$log"
-    return "$status"
-  fi
-  "$@" >"$log" 2>&1 &
+  [ -t 1 ] && tty=1
+  # La entrada estándar va a /dev/null: ninguno de los comandos que se envuelven
+  # aquí es interactivo, y así ni consumen lo que el usuario teclee ni se quedan
+  # esperando una respuesta que no se ve (cp y mv preguntan por stderr cuando el
+  # destino no es escribible, y stderr va al registro).
+  "$@" </dev/null >"$log" 2>&1 &
   pid=$!
+  # Se sondea cada cuarto de segundo para que un comando rápido no arrastre un
+  # segundo entero de espera, pero el contador avanza de segundo en segundo.
   while kill -0 "$pid" 2>/dev/null; do
-    printf '\r  %s... %ds ' "$msg" "$secs"
-    sleep 1
+    sleep 0.25
+    tick=$((tick + 1))
+    [ "$tick" -ge 4 ] || continue
+    tick=0
     secs=$((secs + 1))
+    if [ "$tty" = "1" ]; then
+      printf '\r  %s... %ds ' "$msg" "$secs"
+    elif [ $((secs % 5)) -eq 0 ]; then
+      printf '  %s... %ds\n' "$msg" "$secs"
+    fi
   done
   wait "$pid" || status=$?
-  printf '\r\033[K'
+  [ "$tty" = "0" ] || printf '\r\033[K'
   if [ "$status" -ne 0 ] && [ "$quieto" != "1" ]; then
     echo "  $msg: ha fallado." >&2
     sed 's/^/    /' "$log" >&2
@@ -367,7 +376,7 @@ if [ "$IS_WSL" = "1" ] && [ -z "${IDE_HOME:-}" ]; then
     paso "Descomprimiendo IntelliJ IDEA" descomprimir_ide
     rm -f "$DL_DIR/idea.tar.gz"
     rm -rf "$LINUX_IDE_DIR"
-    mv "$DL_DIR" "$LINUX_IDE_DIR"
+    mv -f "$DL_DIR" "$LINUX_IDE_DIR" </dev/null
   fi
   IDE_HOME="$LINUX_IDE_DIR"
 fi
@@ -425,17 +434,26 @@ PRODUCT_DATA="$STATE_DIR/data/$DATA_DIR_NAME"
 mkdir -p "$PRODUCT_CONFIG" "$PRODUCT_DATA"
 
 # Migración desde el diseño anterior, que montaba solo el directorio del producto.
+# Dos precauciones en cada mv:
+#  - Si el destino ya existe no se toca. Ya está migrado, y volver a moverlo lo
+#    anidaría dentro de sí mismo.
+#  - La entrada estándar va a /dev/null porque los restos de montajes del
+#    contenedor son del usuario 100000 y no son escribibles: mv pregunta
+#    "¿reemplazar '...', sustituyendo el modo 0555? (s/n)" por stderr, que aquí
+#    va silenciado, así que el script se quedaba esperando un Enter invisible.
 for entry in "$STATE_DIR/config"/*; do
   [ -e "$entry" ] || continue
   [ "$entry" = "$PRODUCT_CONFIG" ] && continue
-  mv "$entry" "$PRODUCT_CONFIG/" 2>/dev/null || true
+  [ -e "$PRODUCT_CONFIG/$(basename "$entry")" ] && continue
+  mv -f "$entry" "$PRODUCT_CONFIG/" </dev/null 2>/dev/null || true
 done
 for entry in "$STATE_DIR/data"/*; do
   [ -e "$entry" ] || continue
   case "$(basename "$entry")" in
     "$DATA_DIR_NAME"|consentOptions) continue ;;
   esac
-  mv "$entry" "$PRODUCT_DATA/" 2>/dev/null || true
+  [ -e "$PRODUCT_DATA/$(basename "$entry")" ] && continue
+  mv -f "$entry" "$PRODUCT_DATA/" </dev/null 2>/dev/null || true
 done
 
 # Do not share ~/.gradle with the host: its Gradle daemon keeps the journal
@@ -647,7 +665,7 @@ if [ "${IMPORT_HOST_LICENSE:-1}" = "1" ]; then
   if [ ! -d "$JAVA_STATE/.userPrefs/jetbrains/auth-tokens" ]; then
     if [ -d "$HOST_PREFS" ]; then
       mkdir -p "$JAVA_STATE/.userPrefs"
-      cp -a "$HOST_PREFS" "$JAVA_STATE/.userPrefs/jetbrains"
+      cp -a "$HOST_PREFS" "$JAVA_STATE/.userPrefs/jetbrains" </dev/null
       echo "Cuenta y términos del IDE del host importados en el contenedor."
       LICENSE_IMPORTED=1
     elif PASO_QUIETO=1 paso "Importando la cuenta de JetBrains del registro de Windows" \
@@ -730,6 +748,47 @@ if ! grep -qs 'name="shouldShowNextTime" value="NO"' "$PROMO_STATE_FILE"; then
   </component>
 </application>
 PROMO_EOF
+fi
+
+# Tercer cerrojo: al arrancar con la interfaz nueva el IDE ofrece la ventana
+# "Meet the islands theme" (el tour de bienvenida de Islands). No es IA, pero es
+# otra pantalla de primer arranque que aparece sin esperarla. Se apaga con la
+# clave de registry "ide.experimental.ui.onboarding", que el propio IDE define
+# con valor por defecto true (lib/intellij.idea.ultimate.customization.jar,
+# META-INF/plugin.xml). El IDE guarda los cambios de registry en dos sitios y se
+# escriben los dos para no depender de cuál lea esta versión: el fichero
+# early-access-registry.txt (pares de líneas clave/valor) y el componente
+# Registry de options/ide.general.xml.
+mkdir -p "$PRODUCT_CONFIG/options"
+EARLY_REG_FILE="$PRODUCT_CONFIG/early-access-registry.txt"
+ONBOARDING_KEY="ide.experimental.ui.onboarding"
+if grep -qxF "$ONBOARDING_KEY" "$EARLY_REG_FILE" 2>/dev/null; then
+  # La clave ya está: se sustituye la línea siguiente, que es su valor.
+  awk -v key="$ONBOARDING_KEY" '
+    found { print "false"; found = 0; next }
+    $0 == key { print; found = 1; next }
+    { print }
+    END { if (found) print "false" }
+  ' "$EARLY_REG_FILE" > "$EARLY_REG_FILE.tmp" && mv -f "$EARLY_REG_FILE.tmp" "$EARLY_REG_FILE"
+else
+  printf '%s\nfalse\n' "$ONBOARDING_KEY" >> "$EARLY_REG_FILE"
+fi
+
+GENERAL_XML="$PRODUCT_CONFIG/options/ide.general.xml"
+ONBOARDING_ENTRY="    <entry key=\"$ONBOARDING_KEY\" value=\"false\" />"
+if [ ! -f "$GENERAL_XML" ]; then
+  printf '<application>\n  <component name="Registry">\n%s\n  </component>\n</application>\n' \
+    "$ONBOARDING_ENTRY" > "$GENERAL_XML"
+elif grep -qF "key=\"$ONBOARDING_KEY\"" "$GENERAL_XML"; then
+  sed -i "s|\(<entry key=\"$ONBOARDING_KEY\" value=\"\)[^\"]*\"|\1false\"|" "$GENERAL_XML"
+elif grep -qF '<component name="Registry">' "$GENERAL_XML"; then
+  sed -i "/<component name=\"Registry\">/a\\$ONBOARDING_ENTRY" "$GENERAL_XML"
+elif grep -qE '<component name="Registry" */>' "$GENERAL_XML"; then
+  sed -i "s|<component name=\"Registry\" */>|<component name=\"Registry\">\n$ONBOARDING_ENTRY\n  </component>|" \
+    "$GENERAL_XML"
+elif grep -qF '</application>' "$GENERAL_XML"; then
+  sed -i "s|</application>|  <component name=\"Registry\">\n$ONBOARDING_ENTRY\n  </component>\n</application>|" \
+    "$GENERAL_XML"
 fi
 
 # Disabling Copilot is not enough: it could be reinstalled from the plugin

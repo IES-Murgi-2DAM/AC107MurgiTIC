@@ -163,6 +163,12 @@ La primera vez descarga el IDE de Linux de la misma versión que el de Windows
 (~1,6 GB) y lo guarda en `~/.local/share/idea-container/idea-linux/`. Las
 siguientes veces arranca en segundos.
 
+En ese primer arranque el IDE no enseña las ventanas promocionales de primer
+uso: el lanzador desactiva los plugins de IA (GitHub Copilot y Full Line Code
+Completion), da por descartada la promo de AI Assistant y apaga el tour «Meet
+the islands theme». El autocompletado normal del IDE y los generadores de
+código siguen funcionando.
+
 Mientras hace las tareas largas (copiar la caché de Gradle, la copia de
 seguridad del proyecto, arrancar adb) el lanzador va contando los segundos en
 la misma línea:
@@ -174,6 +180,12 @@ la misma línea:
 Si ese contador avanza, está trabajando: no se ha colgado. La primera vez
 tarda más porque copia la caché de Gradle de tu usuario (varios GB) para que
 luego puedas compilar sin conexión.
+
+Ese contador se reescribe sobre la misma línea, así que hace falta una
+terminal de verdad. Si lanzas el script desde la ventana *Run* de IntelliJ, con
+`| tee` o desde `wsl.exe`, no puede reescribir y en su lugar deja una línea
+cada 5 segundos. Los pasos que duran menos que eso no muestran nada, y es
+normal.
 
 Antes de arrancar, el lanzador guarda también una copia de seguridad del
 proyecto en `~/.local/share/idea-container/backups/<carpeta-proyecto>/`. Copia
