@@ -15,7 +15,9 @@
 #
 # Overridable variables: IDE_HOME, IDEA_VERSION, DATA_DIR_NAME, IMAGE,
 # CONTAINER_NAME, STATE_DIR, GRADLE_CACHE, NETWORK, CONTAINER_ENGINE,
-# ADB_HOST, IMPORT_HOST_LICENSE, AUTO_BACKUP, DRY_RUN.
+# ADB_HOST, IMPORT_HOST_LICENSE, AUTO_BACKUP, DRY_RUN, KEEP_SELINUX.
+# En Linux nativo IDE_HOME se detecta solo; solo hace falta fijarla si el IDE
+# está en una ubicación poco habitual.
 
 set -euo pipefail
 
@@ -43,8 +45,26 @@ win_path() {
   esac
 }
 
-if [ "$IS_WSL" = "1" ] && [ -z "${WIN_HOME:-}" ] && command -v cmd.exe >/dev/null 2>&1; then
-  WIN_HOME="$(win_path "$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r')")"
+# Pide a Windows el valor real de una variable de entorno. Las rutas estándar no
+# sirven siempre: hay perfiles con el usuario en otra unidad y administradores
+# que han redirigido AppData, y entonces C:\Users\<usuario>\AppData no existe.
+win_env() {
+  local var="$1" value
+  [ "$IS_WSL" = "1" ] || return 1
+  command -v cmd.exe >/dev/null 2>&1 || return 1
+  value="$(cmd.exe /c "echo %$var%" 2>/dev/null | tr -d '\r')"
+  # Si la variable no existe, cmd deja el nombre sin expandir.
+  case "$value" in ""|"%$var%") return 1 ;; esac
+  win_path "$value"
+}
+
+if [ "$IS_WSL" = "1" ]; then
+  WIN_HOME="${WIN_HOME:-$(win_env USERPROFILE || true)}"
+  WIN_APPDATA="${WIN_APPDATA:-$(win_env APPDATA || true)}"
+  WIN_LOCALAPPDATA="${WIN_LOCALAPPDATA:-$(win_env LOCALAPPDATA || true)}"
+  WIN_PROGRAMFILES="${WIN_PROGRAMFILES:-$(win_env ProgramFiles || true)}"
+  [ -n "${WIN_APPDATA:-}" ] || WIN_APPDATA="${WIN_HOME:-}/AppData/Roaming"
+  [ -n "${WIN_LOCALAPPDATA:-}" ] || WIN_LOCALAPPDATA="${WIN_HOME:-}/AppData/Local"
 fi
 if [ "$IS_WSL" = "1" ] && [ -z "${WIN_HOME:-}" ]; then
   echo "Aviso: no localizo tu carpeta de usuario de Windows, así que no se" >&2
@@ -70,20 +90,29 @@ if [ "$IS_WSL" = "1" ] && [ "${ALLOW_WSL_FS:-0}" != "1" ]; then
   esac
 fi
 
-# Busca la instalación de IntelliJ IDEA de Windows (Toolbox o instalador
-# clásico) y devuelve la ruta de su product-info.json.
+# Busca la instalación de IntelliJ IDEA de Windows y devuelve la ruta de su
+# product-info.json. Hay tres formas habituales de instalarlo (Toolbox, el
+# instalador clásico en Program Files y el ZIP descomprimido), y puede haber
+# varias versiones a la vez; se usa la más reciente, que es la que el alumno
+# tiene abierta y licenciada.
 find_windows_product_info() {
-  [ -n "${WIN_HOME:-}" ] || return 1
-  local root candidate
-  for root in "$WIN_HOME/AppData/Local/JetBrains/Toolbox/apps/intellij-idea-ultimate" \
-              "$WIN_HOME/AppData/Local/Programs"; do
+  [ "$IS_WSL" = "1" ] || return 1
+  local root candidate found
+  local roots=()
+  [ -n "${WIN_LOCALAPPDATA:-}" ] \
+    && roots+=("$WIN_LOCALAPPDATA/JetBrains/Toolbox/apps" "$WIN_LOCALAPPDATA/Programs")
+  [ -n "${WIN_PROGRAMFILES:-}" ] && roots+=("$WIN_PROGRAMFILES/JetBrains")
+  [ -n "${WIN_HOME:-}" ] \
+    && roots+=("$WIN_HOME/AppData/Local/JetBrains/Toolbox/apps" "$WIN_HOME/AppData/Local/Programs")
+  for root in "${roots[@]:-}"; do
     [ -d "$root" ] || continue
     while IFS= read -r candidate; do
       if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if str(d.get("dataDirectoryName","")).startswith("IntelliJIdea") else 1)' "$candidate" 2>/dev/null; then
         printf '%s\n' "$candidate"
         return 0
       fi
-    done < <(find "$root" -maxdepth 4 -name product-info.json 2>/dev/null)
+    done < <(find "$root" -maxdepth 4 -name product-info.json -printf '%T@ %p\n' 2>/dev/null \
+               | sort -rn | cut -d' ' -f2-)
   done
   return 1
 }
@@ -151,12 +180,64 @@ NETWORK="${NETWORK:-bridge}"
 ADB_HOST="${ADB_HOST:-127.0.0.1}"
 DRY_RUN="${DRY_RUN:-0}"
 
+# Devuelve la ruta de un IDE Linux utilizable dentro del directorio dado. Toolbox
+# instala cada build en ch-<n>/<build>/ y deja un enlace "current", pero otras
+# instalaciones (ZIP descomprimido, paquete) tienen bin/idea.sh directamente.
+ide_dir_if_valid() {
+  local dir="$1" sub
+  [ -d "$dir" ] || return 1
+  if [ -x "$dir/bin/idea.sh" ]; then
+    printf '%s\n' "$dir"
+    return 0
+  fi
+  for sub in "$dir"/ch-*/current "$dir"/ch-*/*; do
+    if [ -x "$sub/bin/idea.sh" ]; then
+      printf '%s\n' "$sub"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Cada alumno instala el IDE donde quiere, así que no basta con una ruta fija:
+# el nombre del producto cambia (intellij-idea-ultimate, intellij-idea, IDEA-U)
+# y quien no usa Toolbox lo deja en el home o en /opt. Se prueban todas las
+# ubicaciones habituales en orden; la primera que tenga bin/idea.sh vale.
+detect_ide_home() {
+  local candidate
+  for candidate in \
+    "$HOME/.local/share/JetBrains/Toolbox/apps/intellij-idea-ultimate" \
+    "$HOME/.local/share/JetBrains/Toolbox/apps/intellij-idea" \
+    "$HOME/.local/share/JetBrains/Toolbox/apps/IDEA-U" \
+    "$HOME"/.local/share/JetBrains/Toolbox/apps/intellij-idea* \
+    "$HOME"/.local/share/JetBrains/Toolbox/apps/IDEA-U \
+    "$HOME"/idea-IU-* \
+    "$HOME"/idea-* \
+    "$HOME"/opt/idea* \
+    "$HOME"/.local/opt/idea* \
+    "$HOME"/snap/intellij-idea-ultimate/current \
+    /snap/intellij-idea-ultimate/current \
+    /opt/idea* \
+    /usr/local/idea* \
+    /usr/share/idea*; do
+    if ide_dir_if_valid "$candidate"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # En Linux se reutiliza el IDE ya instalado en el host: misma versión y cero
 # descargas. En WSL ese IDE es de Windows y no sirve dentro del contenedor, así
 # que se toma la versión del IDE de Windows y se descarga el Linux en la imagen.
-if [ -z "${IDE_HOME:-}" ] \
-   && [ -x "$HOME/.local/share/JetBrains/Toolbox/apps/intellij-idea-ultimate/bin/idea.sh" ]; then
-  IDE_HOME="$HOME/.local/share/JetBrains/Toolbox/apps/intellij-idea-ultimate"
+# Por eso la detección solo se hace fuera de WSL: allí un IDE Linux dentro de la
+# distro llevaría a mezclar su configuración con la del IDE de Windows.
+if [ -z "${IDE_HOME:-}" ] && [ "$IS_WSL" != "1" ]; then
+  if IDE_HOME="$(detect_ide_home)"; then
+    echo "IDE del host detectado: $IDE_HOME"
+  else
+    IDE_HOME=""
+  fi
 fi
 
 product_info_field() {
@@ -166,8 +247,12 @@ product_info_field() {
 if [ -n "${IDE_HOME:-}" ]; then
   if [ ! -x "$IDE_HOME/bin/idea.sh" ]; then
     echo "No encuentro la instalación de IntelliJ IDEA en: $IDE_HOME" >&2
-    echo "Define IDE_HOME con la ruta correcta o déjalo vacío para usar el IDE" >&2
-    echo "incluido en la imagen (solo en WSL)." >&2
+    echo "La ruta de IDE_HOME tiene que ser la carpeta que contiene bin/idea.sh." >&2
+    echo "Para ver las instalaciones que tienes:" >&2
+    echo "  ls ~/.local/share/JetBrains/Toolbox/apps/" >&2
+    echo "Y luego:" >&2
+    echo "  export IDE_HOME=\"\$HOME/.local/share/JetBrains/Toolbox/apps/intellij-idea\"" >&2
+    echo "Si lo dejas vacío en WSL se usa el IDE incluido en la imagen." >&2
     exit 1
   fi
   PRODUCT_INFO="$IDE_HOME/product-info.json"
@@ -175,7 +260,11 @@ elif [ "$IS_WSL" = "1" ]; then
   PRODUCT_INFO="$(find_windows_product_info || true)"
 else
   echo "No encuentro la instalación de IntelliJ IDEA en el host." >&2
-  echo "Define IDE_HOME con la ruta correcta." >&2
+  echo "He buscado en las rutas habituales de Toolbox, en el home y en /opt." >&2
+  echo "Para ver las instalaciones que tienes:" >&2
+  echo "  ls ~/.local/share/JetBrains/Toolbox/apps/" >&2
+  echo "Y luego:" >&2
+  echo "  export IDE_HOME=\"\$HOME/.local/share/JetBrains/Toolbox/apps/intellij-idea\"" >&2
   exit 1
 fi
 
@@ -236,12 +325,14 @@ fi
 # los plugins y el consentimiento están bajo %APPDATA%\JetBrains, y las
 # preferencias de Java bajo %USERPROFILE%\.java.
 if [ "$IS_WSL" = "1" ]; then
-  HOST_COMMON_DATA="${HOST_COMMON_DATA:-${WIN_HOME:-}/AppData/Roaming/JetBrains}"
+  HOST_COMMON_DATA="${HOST_COMMON_DATA:-${WIN_APPDATA:-}/JetBrains}"
+  HOST_CONFIG_ROOT="${HOST_CONFIG_ROOT:-${WIN_APPDATA:-}/JetBrains}"
   HOST_CONFIG="${HOST_CONFIG:-$HOST_COMMON_DATA/$DATA_DIR_NAME}"
   HOST_PREFS="${HOST_PREFS:-${WIN_HOME:-}/.java/.userPrefs/jetbrains}"
   HOST_PLUGIN_DIR="${HOST_PLUGIN_DIR:-$HOST_CONFIG/plugins}"
 else
   HOST_COMMON_DATA="${HOST_COMMON_DATA:-$HOME/.local/share/JetBrains}"
+  HOST_CONFIG_ROOT="${HOST_CONFIG_ROOT:-$HOME/.config/JetBrains}"
   HOST_CONFIG="${HOST_CONFIG:-$HOME/.config/JetBrains/$DATA_DIR_NAME}"
   HOST_PREFS="${HOST_PREFS:-$HOME/.java/.userPrefs/jetbrains}"
   HOST_PLUGIN_DIR="${HOST_PLUGIN_DIR:-$HOST_COMMON_DATA/$DATA_DIR_NAME}"
@@ -336,27 +427,142 @@ if [ "${AUTO_BACKUP:-1}" = "1" ]; then
   fi
 fi
 
+# El alumno puede tener el IDE en el directorio de producto de otra versión
+# (Toolbox deja varias instaladas) o haber instalado otra copia, así que no se
+# exige una ruta exacta: se busca el idea.key más reciente en todo el árbol de
+# configuración de JetBrains. Devuelve la ruta del que se vaya a usar.
+find_host_license() {
+  local root="$1"
+  [ -d "$root" ] || return 1
+  find "$root" -maxdepth 3 -type f -name idea.key -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | head -n 1 | cut -d' ' -f2-
+}
+
+xml_escape() {
+  local s="$1"
+  s="${s//&/&amp;}"
+  s="${s//</&lt;}"
+  s="${s//>/&gt;}"
+  s="${s//\"/&quot;}"
+  printf '%s' "$s"
+}
+
+# Deshace el escapado que java.util.prefs aplica al guardar en el registro:
+# "\" es un "/" y "//" es un "\" literal ("//r", "//n" y "//t" son los saltos).
+prefs_decode() {
+  local s="$1" out="" i=0 c n
+  while [ "$i" -lt "${#s}" ]; do
+    c="${s:i:1}"
+    if [ "$c" = "/" ] && [ "${s:i+1:1}" = "/" ]; then
+      n="${s:i+2:1}"
+      case "$n" in
+        r) out+=$'\r'; i=$((i + 3)) ;;
+        n) out+=$'\n'; i=$((i + 3)) ;;
+        t) out+=$'\t'; i=$((i + 3)) ;;
+        *) out+='\'; i=$((i + 2)) ;;
+      esac
+    elif [ "$c" = '\' ]; then
+      out+="/"; i=$((i + 1))
+    else
+      out+="$c"; i=$((i + 1))
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# En Windows java.util.prefs no usa ficheros: guarda los nodos en el registro
+# (HKCU\Software\JavaSoft\Prefs), así que ~/.java/.userPrefs no existe y la
+# cuenta JetBrains no se puede copiar como fichero. Se exporta esa rama y se
+# reconstruye el árbol de prefs.xml que espera el IDE de Linux: un directorio
+# por nodo, con sus entradas en prefs.xml.
+import_windows_prefs() {
+  local dest="$1" dump line cur="" rel rest name tail type value
+  [ "$IS_WSL" = "1" ] || return 1
+  command -v reg.exe >/dev/null 2>&1 || return 1
+  dump="$(reg.exe query 'HKCU\Software\JavaSoft\Prefs\jetbrains' /s 2>/dev/null | tr -d '\r')" || true
+  [ -n "$dump" ] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      HKEY_*)
+        # Cierra el nodo anterior y abre el nuevo con la cabecera del formato.
+        [ -z "$cur" ] || printf '</map>\n' >> "$cur"
+        rel="${line#HKEY_CURRENT_USER\\Software\\JavaSoft\\Prefs\\jetbrains}"
+        rel="${rel#\\}"
+        rel="${rel//\\//}"
+        mkdir -p "$dest/$rel"
+        cur="$dest/$rel/prefs.xml"
+        {
+          printf '<?xml version="1.0" encoding="UTF-8" standalone="no"?>\n'
+          printf '<!DOCTYPE map SYSTEM "http://java.sun.com/dtd/preferences.dtd">\n'
+          printf '<map MAP_XML_VERSION="1.0">\n'
+        } > "$cur"
+        ;;
+      " "*)
+        [ -n "$cur" ] || continue
+        rest="${line#"${line%%[![:space:]]*}"}"
+        case "$rest" in *"    REG_"*) ;; *) continue ;; esac
+        name="${rest%%    REG_*}"
+        # reg query alinea las columnas: el nombre lleva espacios de relleno
+        # detrás y el valor puede llevarlos delante.
+        name="${name%"${name##*[![:space:]]}"}"
+        tail="${rest#*    REG_}"
+        type="${tail%%    *}"
+        case "$tail" in *"    "*) value="${tail#*    }" ;; *) value="" ;; esac
+        value="${value#"${value%%[![:space:]]*}"}"
+        # Solo los valores de texto: los binarios del registro no los usa el IDE.
+        [ "$type" = "SZ" ] || continue
+        printf '  <entry key="%s" value="%s" />\n' \
+          "$(xml_escape "$(prefs_decode "$name")")" \
+          "$(xml_escape "$(prefs_decode "$value")")" >> "$cur"
+        ;;
+    esac
+  done <<< "$dump"
+  [ -z "$cur" ] || printf '</map>\n' >> "$cur"
+  return 0
+}
+
 # La licencia es siempre la del alumno que ejecuta el script: nunca se copia
 # una licencia ajena dentro del estado del contenedor. Lo que se reutiliza es
 # la activación que ese mismo usuario ya tiene en su IDE del host, para que no
 # tenga que volver a iniciar sesión dentro del contenedor.
 # Son tres piezas distintas: el ticket de licencia (idea.key), los datos de
-# cuenta y aceptación de términos (~/.java/.userPrefs/jetbrains) y la respuesta
-# al diálogo de envío de estadísticas (consentOptions/accepted, que vive en el
-# directorio común de datos, hermano del del producto).
+# cuenta y aceptación de términos (java.util.prefs) y la respuesta al diálogo
+# de envío de estadísticas (consentOptions/accepted, que vive en el directorio
+# común de datos, hermano del del producto).
 # Solo se copian si el contenedor aún no tiene nada, para no pisar nunca una
 # sesión iniciada dentro del propio contenedor. IMPORT_HOST_LICENSE=0 lo anula.
 HOST_CONSENT="$HOST_COMMON_DATA/consentOptions/accepted"
 CONSENT_FILE="$STATE_DIR/data/consentOptions/accepted"
+LICENSE_IMPORTED=0
 if [ "${IMPORT_HOST_LICENSE:-1}" = "1" ]; then
-  if [ ! -f "$PRODUCT_CONFIG/idea.key" ] && [ -f "$HOST_CONFIG/idea.key" ]; then
-    cp -f "$HOST_CONFIG/idea.key" "$PRODUCT_CONFIG/idea.key"
-    echo "Licencia del IDE del host importada en el contenedor."
+  if [ ! -f "$PRODUCT_CONFIG/idea.key" ]; then
+    # En Linux el idea.key vive en ~/.config/JetBrains/<producto>/, mientras que
+    # en Windows todo cuelga de %APPDATA%\JetBrains. Se buscan los dos árboles
+    # porque en cada plataforma solo uno de ellos lo contiene.
+    for root in "$HOST_CONFIG_ROOT" "$HOST_COMMON_DATA"; do
+      host_key="$(find_host_license "$root")"
+      [ -n "$host_key" ] && break
+    done
+    if [ -n "${host_key:-}" ]; then
+      cp -f "$host_key" "$PRODUCT_CONFIG/idea.key"
+      echo "Licencia del IDE del host importada en el contenedor ($host_key)."
+      LICENSE_IMPORTED=1
+    fi
+  else
+    LICENSE_IMPORTED=1
   fi
-  if [ ! -d "$JAVA_STATE/.userPrefs/jetbrains/auth-tokens" ] && [ -d "$HOST_PREFS" ]; then
-    mkdir -p "$JAVA_STATE/.userPrefs"
-    cp -a "$HOST_PREFS" "$JAVA_STATE/.userPrefs/jetbrains"
-    echo "Cuenta y términos del IDE del host importados en el contenedor."
+  if [ ! -d "$JAVA_STATE/.userPrefs/jetbrains/auth-tokens" ]; then
+    if [ -d "$HOST_PREFS" ]; then
+      mkdir -p "$JAVA_STATE/.userPrefs"
+      cp -a "$HOST_PREFS" "$JAVA_STATE/.userPrefs/jetbrains"
+      echo "Cuenta y términos del IDE del host importados en el contenedor."
+      LICENSE_IMPORTED=1
+    elif import_windows_prefs "$JAVA_STATE/.userPrefs/jetbrains"; then
+      echo "Cuenta de JetBrains del IDE de Windows importada en el contenedor."
+      LICENSE_IMPORTED=1
+    fi
+  else
+    LICENSE_IMPORTED=1
   fi
   if [ ! -f "$CONSENT_FILE" ] && [ -f "$HOST_CONSENT" ]; then
     mkdir -p "$(dirname "$CONSENT_FILE")"
@@ -365,10 +571,15 @@ if [ "${IMPORT_HOST_LICENSE:-1}" = "1" ]; then
   fi
 fi
 
-if [ ! -f "$PRODUCT_CONFIG/idea.key" ]; then
-  echo "Aviso: el contenedor aún no tiene licencia y el IDE del host tampoco." >&2
-  echo "Inicia sesión con la cuenta JetBrains del alumno la primera vez;" >&2
-  echo "quedará guardada en $PRODUCT_CONFIG." >&2
+if [ "$LICENSE_IMPORTED" = "0" ]; then
+  echo "Aviso: no he encontrado la licencia en el IDE del host, así que el" >&2
+  echo "contenedor pedirá iniciar sesión la primera vez (quedará guardada en" >&2
+  echo "$PRODUCT_CONFIG). He buscado en:" >&2
+  echo "  $HOST_CONFIG_ROOT" >&2
+  echo "  $HOST_COMMON_DATA" >&2
+  [ "$IS_WSL" != "1" ] || echo "  HKCU\\Software\\JavaSoft\\Prefs\\jetbrains (registro de Windows)" >&2
+  echo "Comprueba que has abierto IntelliJ IDEA en el host y has validado la" >&2
+  echo "licencia al menos una vez." >&2
 fi
 
 # Si el IDE no se cerró limpiamente (contenedor detenido a la fuerza) queda un
@@ -396,12 +607,36 @@ fi
 
 # Keep Copilot (and the AI helpers) disabled even if a plugin is installed
 # later. The file is mounted read-only inside the container.
+# org.jetbrains.completion.full.line no es el autocompletado del IDE: es el
+# plugin "Full Line Code Completion", que completa líneas enteras con un modelo
+# de IA y además trae dentro el módulo llmInstaller (ventana de promo y
+# autoinstalación de AI Assistant). El autocompletado normal, las plantillas y
+# los generadores de código (constructores, getters, setters) son del núcleo del
+# IDE y no dependen de ningún plugin.
 DISABLED_PLUGINS_FILE="$PRODUCT_CONFIG/disabled_plugins.txt"
 touch "$DISABLED_PLUGINS_FILE"
 for plugin_id in com.github.copilot com.github.copilot.provider.helper \
-                 com.intellij.ml.llm com.intellij.ml.local.models; do
+                 com.intellij.ml.llm com.intellij.ml.local.models \
+                 org.jetbrains.completion.full.line; do
   grep -qxF "$plugin_id" "$DISABLED_PLUGINS_FILE" || echo "$plugin_id" >> "$DISABLED_PLUGINS_FILE"
 done
+
+# Segundo cerrojo: con el plugin anterior deshabilitado la ventana que ofrece
+# instalar AI Assistant ya no puede cargarse, pero si algún día se reactiva el
+# plugin o el módulo llega por otra vía, el estado que escribe el propio IDE al
+# descartarla (shouldShowNextTime="NO") evita que vuelva a salir.
+PROMO_STATE_FILE="$PRODUCT_CONFIG/options/AIOnboardingPromoWindowAdvisor.xml"
+mkdir -p "$(dirname "$PROMO_STATE_FILE")"
+if ! grep -qs 'name="shouldShowNextTime" value="NO"' "$PROMO_STATE_FILE"; then
+  cat > "$PROMO_STATE_FILE" <<'PROMO_EOF'
+<application>
+  <component name="AIOnboardingPromoWindowAdvisor">
+    <option name="attempts" value="8" />
+    <option name="shouldShowNextTime" value="NO" />
+  </component>
+</application>
+PROMO_EOF
+fi
 
 # Disabling Copilot is not enough: it could be reinstalled from the plugin
 # marketplace. Point the marketplace hosts to localhost inside the container

@@ -89,6 +89,15 @@ configuración, los plugins y la ruta del SDK (por defecto
 `%LOCALAPPDATA%\Android\Sdk`; si lo instalaste en otra carpeta lo lee de
 `config/options/jdk.table.xml`). No hace falta `local.properties`.
 
+> **La licencia se importa sola, pero hay que haberla activado en Windows.**
+> En Windows el IDE no guarda la cuenta en un fichero, sino en el **registro**
+> (`HKEY_CURRENT_USER\Software\JavaSoft\Prefs\jetbrains`); el lanzador lo lee y
+> reconstruye la configuración que espera el IDE de Linux. Además busca el
+> fichero `idea.key` más reciente en la carpeta de datos de JetBrains, porque
+> puede estar en la carpeta de otra versión del producto. Si al arrancar el
+> contenedor ves `No he encontrado la licencia`, abre IntelliJ IDEA en Windows,
+> comprueba en *Help → Register* que la licencia está activa y vuelve a lanzar.
+
 > El IDE de Windows y el del contenedor tienen que ser la **misma versión**:
 > el lanzador lo comprueba y descarga la versión de Linux equivalente.
 
@@ -239,6 +248,7 @@ Variables que acepta el lanzador, por si quieres tocar algo:
 | `AUTO_BACKUP=0` | No hace la copia de seguridad del proyecto |
 | `ADB_HOST=...` | IP del servidor adb (por defecto la puerta de enlace de WSL) |
 | `SDK_DIR=/ruta` | Fuerza la ruta del SDK de Android |
+| `IDE_HOME=/ruta` | Fuerza la ruta del IDE Linux del host (solo Linux nativo; ver §9) |
 | `CONTAINER_ENGINE=docker` | Fuerza el motor de contenedores |
 | `CONTAINER_NAME=...` | Nombre del contenedor (por defecto `idea-desktop-test`) |
 | `ALLOW_WSL_FS=1` | Permite arrancar con el proyecto dentro de WSL (bajo tu riesgo) |
@@ -275,15 +285,73 @@ Desktop. Desde la carpeta del proyecto:
 bash docker/idea-desktop/run-idea.sh
 ```
 
+### Si el lanzador no encuentra el IDE (`IDE_HOME`)
+
+El IDE del contenedor es **el mismo que tengas instalado en Linux**: el
+lanzador lo busca solo y lo monta de solo lectura, así que no se descarga nada.
+Busca, en este orden, en:
+
+- Toolbox: `~/.local/share/JetBrains/Toolbox/apps/` con los nombres
+  `intellij-idea-ultimate`, `intellij-idea` e `IDEA-U`, tanto si el IDE está en
+  la carpeta del producto como si está en `ch-0/<build>/`.
+- Instalaciones descomprimidas: `~/idea-*`, `~/opt/idea*`, `/opt/idea*`,
+  `/usr/local/idea*`, `/usr/share/idea*`.
+- Snap: `/snap/intellij-idea-ultimate/current`.
+
+Si lo encuentra, lo dice al arrancar:
+
+```
+IDE del host detectado: /home/<tu-usuario>/.local/share/JetBrains/Toolbox/apps/intellij-idea
+```
+
+Si no, para ver qué tienes instalado:
+
+```bash
+ls ~/.local/share/JetBrains/Toolbox/apps/
+```
+
+El nombre **no siempre es `intellij-idea-ultimate`**: en muchas instalaciones es
+`intellij-idea`. Y lo que hay que indicar es la carpeta que contiene
+`bin/idea.sh`, no la de dentro de `bin`:
+
+```bash
+ls ~/.local/share/JetBrains/Toolbox/apps/intellij-idea/bin/idea.sh
+```
+
+Si esa ruta existe, se fija `IDE_HOME` y se añade al final de `~/.bashrc` para
+no repetirlo en cada terminal:
+
+```bash
+echo 'export IDE_HOME="$HOME/.local/share/JetBrains/Toolbox/apps/intellij-idea"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Ajusta la ruta a la tuya. Para una sola ejecución, sin tocar el `.bashrc`:
+
+```bash
+IDE_HOME="$HOME/idea-IU-2024.3" bash docker/idea-desktop/run-idea.sh
+```
+
+> Apunta siempre a la **carpeta del producto** (`.../intellij-idea`), no a una
+> build concreta (`.../intellij-idea/ch-0/243.12345`): Toolbox borra la anterior
+> al actualizar y la ruta dejaría de existir. El lanzador resuelve solo la build
+> que haya dentro.
+
+> `IDE_HOME` solo se usa en **Linux nativo**. En Windows/WSL2 se ignora: allí el
+> IDE Linux se descarga en `~/.local/share/idea-container/idea-linux/` con la
+> misma versión que el IDEA de Windows.
+
 ## Problemas frecuentes
 
 | Síntoma | Solución |
 |---|---|
 | `docker: command not found` en Ubuntu | Falta activar la integración WSL en Docker Desktop |
+| `No encuentro la instalación de IntelliJ IDEA en el host` | El nombre de la carpeta de Toolbox no es el esperado: ver §9 (*Si el lanzador no encuentra el IDE*) y fijar `IDE_HOME` |
 | No aparece ninguna ventana del IDE | `wsl --update` y comprobar `xeyes` |
 | `instala socat en el host` | `sudo apt install -y socat` (Debian/Ubuntu) o `sudo dnf install -y socat` (Fedora/RHEL), y relanza el IDE |
 | `no alcanzo el servidor adb` | `adb kill-server && adb -a start-server` en PowerShell |
 | El IDE no ve el emulador | Arranca el AVD **antes** que el IDE y comprueba que `socat` está instalado (secciones 3 y 9) |
-| Pide login de JetBrains | Abre una vez IntelliJ IDEA en Windows y valida la licencia |
+| Pide login de JetBrains | Abre una vez IntelliJ IDEA en Windows y valida la licencia; el lanzador importa la cuenta desde el registro de Windows y el `idea.key` más reciente |
+| El IDE del contenedor pide otra vez el diálogo de compartir datos con JetBrains | Es normal si nunca lo respondiste en Windows: la respuesta se guarda en el registro y se copia al contenedor |
 | `Ya hay un IDE abierto en el contenedor` | Ya hay una ventana del IDE abierta, o quedó un contenedor suelto: `docker rm -f idea-desktop-test` |
 | El IDE avisa de que falta un componente del SDK y no puede instalarlo | El SDK se monta de solo lectura: instálalo en el IDEA de Windows y vuelve a abrir |
