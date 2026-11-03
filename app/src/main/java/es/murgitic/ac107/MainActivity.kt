@@ -25,7 +25,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.time.Duration.Companion.milliseconds
 
-val temps = listOf(22.5, 23.0, 21.8, 24.2, 22.9)
+val temps = listOf(25.3, 26.1, 24.8, 27.0, 25.5)
 val humids = listOf(60, 55, 65, 70, 58)
 
 val sensorReadings =
