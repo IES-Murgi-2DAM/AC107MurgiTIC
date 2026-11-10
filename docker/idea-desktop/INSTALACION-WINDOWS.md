@@ -383,6 +383,7 @@ IDE_HOME="$HOME/idea-IU-2024.3" bash docker/idea-desktop/run-idea.sh
 | `no alcanzo el servidor adb` | `adb kill-server && adb -a start-server` en PowerShell |
 | El IDE no ve el emulador | Arranca el AVD **antes** que el IDE y comprueba que `socat` está instalado (secciones 3 y 9) |
 | Pide login de JetBrains | Abre una vez IntelliJ IDEA en Windows y valida la licencia; el lanzador importa la cuenta desde el registro de Windows y el `idea.key` más reciente |
+| `Internal error` con `Last unit does not have enough valid bits` al arrancar | El `idea.key` copiado estaba incompleto. Cierra el IDE de Windows sin forzar el cierre y vuelve a lanzar el script: descarta la licencia rota y la vuelve a copiar |
 | El IDE del contenedor pide otra vez el diálogo de compartir datos con JetBrains | Es normal si nunca lo respondiste en Windows: la respuesta se guarda en el registro y se copia al contenedor |
 | `Ya hay un IDE abierto en el contenedor` | Ya hay una ventana del IDE abierta, o quedó un contenedor suelto: `docker rm -f idea-desktop-test` |
 | Se queda parado un buen rato al arrancar, sin mensajes | Es la copia de la caché de Gradle (varios GB, solo la primera vez) o la copia de seguridad; mientras el contador de segundos avance, está trabajando. `SEED_GRADLE_CACHE=0` se salta la copia de la caché |

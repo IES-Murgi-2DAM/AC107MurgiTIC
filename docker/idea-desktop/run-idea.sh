@@ -541,12 +541,57 @@ fi
 # El alumno puede tener el IDE en el directorio de producto de otra versión
 # (Toolbox deja varias instaladas) o haber instalado otra copia, así que no se
 # exige una ruta exacta: se busca el idea.key más reciente en todo el árbol de
-# configuración de JetBrains. Devuelve la ruta del que se vaya a usar.
-find_host_license() {
+# configuración de JetBrains.
+#
+# Un idea.key cortado a medias hace que el IDE aborte al arrancar con
+# "Internal error ... java.lang.IllegalArgumentException: Last unit does not
+# have enough valid bits": el bloque de licencia va en base64 y el IDE lo
+# decodifica nada más empezar. Por eso no basta con coger el más reciente: se
+# comprueba cada candidato y se usa el primero que esté entero. Pasa cuando el
+# fichero de Windows se queda a medio escribir (sesión interrumpida, copia de
+# OneDrive sin descargar del todo, antivirus...).
+# Los idea.key actuales son UTF-16 con la cabecera "JetProfile" y un bloque
+# base64 partido en líneas, así que quitar los bytes nulos deja el texto.
+license_intacta() {
+  local f="$1" txt b64
+  [ -s "$f" ] || return 1
+  txt="$(tr -d '\000' < "$f" 2>/dev/null \
+        | LC_ALL=C sed -e $'1s/^\xff\xfe//' -e $'1s/^\xfe\xff//' -e $'1s/^\xef\xbb\xbf//' \
+        | tr -d '\r\n')"
+  # Formato desconocido (licencias antiguas): no se puede demostrar que esté
+  # roto, así que se acepta y se mantiene el comportamiento de siempre.
+  case "$txt" in
+    *JetProfile*) ;;
+    *) return 0 ;;
+  esac
+  b64="${txt#*JetProfile}"
+  [ -n "$b64" ] || return 1
+  case "$b64" in *[!A-Za-z0-9+/=]*) return 1 ;; esac
+  [ $((${#b64} % 4)) -eq 0 ] || return 1
+  command -v base64 >/dev/null 2>&1 || return 0
+  printf '%s' "$b64" | base64 -d >/dev/null 2>&1
+}
+
+# Rutas de todos los idea.key del árbol, la más reciente primero.
+find_host_licenses() {
   local root="$1"
-  [ -d "$root" ] || return 1
+  [ -d "$root" ] || return 0
   find "$root" -maxdepth 3 -type f -name idea.key -printf '%T@ %p\n' 2>/dev/null \
-    | sort -rn | head -n 1 | cut -d' ' -f2-
+    | sort -rn | cut -d' ' -f2-
+}
+
+# Devuelve la ruta del idea.key más reciente que además esté entero.
+find_host_license() {
+  local root="$1" candidato
+  while IFS= read -r candidato; do
+    [ -n "$candidato" ] || continue
+    if license_intacta "$candidato"; then
+      printf '%s\n' "$candidato"
+      return 0
+    fi
+    echo "Aviso: descarto $candidato porque el fichero de licencia está incompleto." >&2
+  done <<< "$(find_host_licenses "$root")"
+  return 1
 }
 
 xml_escape() {
@@ -646,6 +691,13 @@ HOST_CONSENT="$HOST_COMMON_DATA/consentOptions/accepted"
 CONSENT_FILE="$STATE_DIR/data/consentOptions/accepted"
 LICENSE_IMPORTED=0
 if [ "${IMPORT_HOST_LICENSE:-1}" = "1" ]; then
+  # Si una ejecución anterior copió una licencia incompleta, el IDE se queda
+  # atascado en el "Internal error" y volver a lanzar el script no lo arregla,
+  # porque la copia ya existe. Se descarta para poder importarla de nuevo.
+  if [ -f "$PRODUCT_CONFIG/idea.key" ] && ! license_intacta "$PRODUCT_CONFIG/idea.key"; then
+    echo "Aviso: la licencia guardada en el contenedor estaba incompleta; la descarto." >&2
+    rm -f "$PRODUCT_CONFIG/idea.key"
+  fi
   if [ ! -f "$PRODUCT_CONFIG/idea.key" ]; then
     # En Linux el idea.key vive en ~/.config/JetBrains/<producto>/, mientras que
     # en Windows todo cuelga de %APPDATA%\JetBrains. Se buscan los dos árboles
